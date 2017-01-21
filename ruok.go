@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mediocregopher/radix.v2/redis"
+	"github.com/parallellink/errr"
 	"github.com/parallellink/srg"
 )
 
@@ -19,8 +20,12 @@ var (
 	sectionPattern = regexp.MustCompile(`^# (.+)$`)
 )
 
-func main() {
+type RedisInfo struct {
+	Info map[string]map[string]string
+	Err  error
+}
 
+func main() {
 	hostsExp := flag.String("h", "", "hosts expression")
 	portsExp := flag.String("p", "", "ports expression")
 	flag.Parse()
@@ -30,10 +35,7 @@ func main() {
 		os.Exit(1)
 	}
 	hosts, err := srg.ParseRange(*hostsExp)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+	errr.ExitOnError(err)
 
 	var ports []string
 	if *portsExp == "" {
@@ -41,47 +43,47 @@ func main() {
 		ports = defaultPorts
 	} else {
 		ports, err = srg.ParseRange(*portsExp)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+		errr.ExitOnError(err)
 	}
 
 	for _, h := range hosts {
 		for _, p := range ports {
-			fmt.Printf("host = %s, port = %s\n", h, p)
 			conn := fmt.Sprintf("%s:%s", h, p)
 
-			client, err := redis.DialTimeout("tcp", conn, timeout)
-			if err != nil {
-				fmt.Println(err)
-				continue
+			ret := info(conn)
+
+			if ret.Err != nil {
+				fmt.Fprintf(os.Stderr, "%s : %v\n", conn, ret.Err)
+			} else {
+				fmt.Printf("%s : %v\n", conn, ret.Info["Clients"]["connected_clients"])
 			}
-			defer client.Close()
-
-			info := client.Cmd("info")
-
-			ret, err := parse(info)
-
-			if err != nil {
-				fmt.Println(err)
-				continue
-			}
-
-			fmt.Println(ret["Clients"]["connected_clients"])
 		}
 	}
 }
 
-func parse(r *redis.Resp) (map[string]map[string]string, error) {
+func info(conn string) RedisInfo {
+	client, err := redis.DialTimeout("tcp", conn, timeout)
+	if err != nil {
+		return RedisInfo{nil, err}
+	}
+	defer client.Close()
 
-	ret := make(map[string]map[string]string)
+	info := client.Cmd("info")
+	ret := parse(info)
+
+	return ret
+}
+
+func parse(r *redis.Resp) RedisInfo {
+	ret := RedisInfo{nil, nil}
 
 	raw, err := r.Str()
 	if err != nil {
-		return nil, err
+		ret.Err = err
+		return ret
 	}
 
+	ret.Info = make(map[string]map[string]string)
 	var section string
 	for _, str := range strings.Split(raw, "\r\n") {
 		if len(str) == 0 {
@@ -94,12 +96,12 @@ func parse(r *redis.Resp) (map[string]map[string]string, error) {
 			continue
 		}
 
-		if ret[section] == nil {
-			ret[section] = make(map[string]string)
+		if ret.Info[section] == nil {
+			ret.Info[section] = make(map[string]string)
 		}
 		parts := strings.Split(str, ":")
-		ret[section][parts[0]] = parts[1]
+		ret.Info[section][parts[0]] = parts[1]
 	}
 
-	return ret, nil
+	return ret
 }
